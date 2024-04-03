@@ -328,3 +328,8 @@ Exemplo de uso:
     dest: /etc/config.txt
   debugger: on_failed
 ```
+ou
+
+```bash
+ANSIBLE_ENABLE_TASK_DEBUGGER=True
+```

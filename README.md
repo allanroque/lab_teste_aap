@@ -296,3 +296,35 @@ ansible ALL=(ALL) NOPASSWD: /usr/bin/rsync
 
 Impacto na Instalação
 É importante notar que esse erro não impactou a conclusão bem-sucedida da instalação.
+
+
+## Resultado Final
+
+Instalação realizada com sucesso
+
+```ìni
+PLAY RECAP *********************************************************************
+ac01.aroque.com.br         : ok=373  changed=179  unreachable=0    failed=0    skipped=223  rescued=4    ignored=6   
+ac02.aroque.com.br         : ok=325  changed=164  unreachable=0    failed=0    skipped=171  rescued=4    ignored=4   
+ac03.aroque.com.br         : ok=323  changed=161  unreachable=0    failed=0    skipped=173  rescued=4    ignored=4   
+db01.aroque.com.br         : ok=83   changed=27   unreachable=0    failed=0    skipped=55   rescued=1    ignored=0   
+localhost        
+```
+
+## Troubleshooting
+
+Durante a execução de playbooks Ansible, pode acontecer de algumas tarefas falharem por diversos motivos, como configurações incorretas, problemas de rede, ou falhas de autenticação. Para facilitar a identificação e resolução desses problemas, o Ansible oferece uma funcionalidade de depuração útil chamada `debugger`.
+
+### Utilizando o Debugger do Ansible
+
+Para tarefas específicas que falharam e para as quais você deseja uma análise mais detalhada, você pode adicionar a diretiva `debugger: on_failed` diretamente na tarefa. Isso invocará o modo debugger do Ansible sempre que a tarefa falhar, permitindo que você inspecione o ambiente de execução, examine variáveis e até mesmo tente modificar parâmetros para testar soluções em tempo real.
+
+Exemplo de uso:
+
+```yaml
+- name: Copiar arquivo de configuração para o servidor
+  ansible.builtin.copy:
+    src: /my/local/config.txt
+    dest: /etc/config.txt
+  debugger: on_failed
+```

@@ -29,7 +29,7 @@
 
 - Usuário `ansible` criado
   - `useradd ansible`
-  - `echo 'ansible:redhat*99' | chpasswd`
+  - `echo 'ansible:*********' | chpasswd`
 - Acesso SSH habilitado para `ansible`
 
 ### Configuração do Sudo
@@ -55,6 +55,82 @@
 ### Pré-requisitos
 
 - **Ansible Core** instalado (`yum install ansible-core`)
+
+## Configuração do inventory e Acessos
+
+Arquivo de inventory sem comentários:
+```ini
+[automationcontroller]
+ac01.aroque.com.br node_type=hybrid
+ac02.aroque.com.br node_type=hybrid
+ac03.aroque.com.br node_type=hybrid
+
+[automationcontroller:vars]
+peers=execution_nodes
+
+[execution_nodes]
+
+[automationhub]
+
+[automationedacontroller]
+
+[database]
+db01.aroque.com.br
+
+[sso]
+
+[all:vars]
+#CONF DE ACESSO
+ansible_user=ansible
+ansible_ssh_pass=*********
+ansible_become=true
+ansible_become_method=sudo
+ansible_become_pass=*********
+
+#admin do Automation Controller
+admin_password='*********'
+
+#credenciais e dados do banco de dados
+pg_host='db01.aroque.com.br'
+pg_port=5432
+pg_database='awx'
+pg_username='awx'
+pg_password='*********'
+pg_sslmode='prefer'  # set to 'verify-full' for client-side enforced SSL
+
+#Configurações adicionais
+registry_url='registry.redhat.io'
+registry_username=''
+registry_password=''
+receptor_listener_port=27199
+automationhub_admin_password=''
+automationhub_pg_host=''
+automationhub_pg_port=5432
+automationhub_pg_database='automationhub'
+automationhub_pg_username='automationhub'
+automationhub_pg_password=''
+automationhub_pg_sslmode='prefer'
+automationedacontroller_admin_password=''
+automationedacontroller_pg_host=''
+automationedacontroller_pg_port=5432
+automationedacontroller_pg_database='automationedacontroller'
+automationedacontroller_pg_username='automationedacontroller'
+automationedacontroller_pg_password=''
+automationedacontroller_pg_sslmode='prefer'
+sso_keystore_password=''
+sso_console_admin_password=''
+```
+
+A configuração do inventário Ansible define as credenciais de acesso SSH, o método de escalonamento de privilégios (become), e outras variáveis globais aplicáveis a todos os hosts gerenciados. Abaixo está a seção relevante do arquivo de inventário Ansible que detalha estas configurações:
+
+```ini
+[all:vars]
+ansible_user=ansible
+ansible_ssh_pass=*********
+ansible_become=true
+ansible_become_method=sudo
+ansible_become_pass=*********
+```
 
 ### Teste de Conexão
 

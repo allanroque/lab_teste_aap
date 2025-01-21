@@ -36,7 +36,7 @@
 
 - Usuário `ansible` configurado para sudo com senha
   - `echo 'ansible ALL=(ALL) ALL' > /etc/sudoers.d/ansible && chmod 440 /etc/sudoers.d/ansible`
-- Acesso SSH como root direto bloqueado (`PermitRootLogin no`)
+- Acesso SSH como root direto bloqueado (`PermitRootLogin no`) - OPCIONAL
   - `sed -i 's/^PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config && systemctl restart sshd`
 
 ## Arquivo `/etc/hosts` dos Servidores

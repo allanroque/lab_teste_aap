@@ -80,12 +80,12 @@ db01.aroque.com.br
 [sso]
 
 [all:vars]
-#CONF DE ACESSO
-ansible_user=ansible
-ansible_ssh_pass=*********
-ansible_become=true
-ansible_become_method=sudo
-ansible_become_pass=*********
+#CONF DE ACESSO - Se necessario
+#ansible_user=ansible
+#ansible_ssh_pass=*********
+#ansible_become=true
+#ansible_become_method=sudo
+#ansible_become_pass=*********
 
 #admin do Automation Controller
 admin_password='*********'

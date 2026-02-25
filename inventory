@@ -1,0 +1,194 @@
+############################################################
+# GLOBAL DEFAULTS
+############################################################
+
+[all:vars]
+company=globaltech
+timezone=America/Sao_Paulo
+ansible_python_interpreter=/usr/bin/python3
+
+############################################################
+# LINUX SERVERS
+############################################################
+
+[linux:vars]
+ansible_connection=ssh
+ansible_user=ansible
+ansible_become=true
+ansible_become_method=sudo
+
+[linux]
+servlinux01.example.com ansible_host=10.10.1.10
+servlinux02.example.com ansible_host=10.10.1.11
+servlinux03.acme.com ansible_host=10.10.1.12
+servlinux04.shadowman.com ansible_host=10.10.1.13
+servlinux05.example.com ansible_host=10.10.1.14
+servlinux06.acme.com ansible_host=10.10.1.15
+servlinux07.shadowman.com ansible_host=10.10.1.16
+servlinux08.example.com ansible_host=10.10.1.17
+servlinux09.acme.com ansible_host=10.10.1.18
+servlinux10.shadowman.com ansible_host=10.10.1.19
+
+############################################################
+# WINDOWS SERVERS - GROUP 1 (PSRP BASIC)
+############################################################
+
+[windows_psrp_basic]
+servwindows01.example.com ansible_host=10.20.1.10
+servwindows02.acme.com ansible_host=10.20.1.11
+servwindows03.shadowman.com ansible_host=10.20.1.12
+
+[windows_psrp_basic:vars]
+ansible_connection=psrp
+ansible_psrp_auth=basic
+ansible_user=LocalUsername
+ansible_password=Password
+
+############################################################
+# WINDOWS SERVERS - GROUP 2 (WINRM BASIC)
+############################################################
+
+[windows_winrm_basic]
+servwindows04.example.com ansible_host=10.20.1.13
+servwindows05.acme.com ansible_host=10.20.1.14
+servwindows06.shadowman.com ansible_host=10.20.1.15
+
+[windows_winrm_basic:vars]
+ansible_connection=winrm
+ansible_winrm_transport=basic
+ansible_user=LocalUsername
+ansible_password=Password
+
+############################################################
+# WINDOWS SERVERS - GROUP 3 (PSRP CREDSSP)
+############################################################
+
+[windows_psrp_credssp]
+servwindows07.example.com ansible_host=10.20.1.16
+servwindows08.acme.com ansible_host=10.20.1.17
+servwindows09.shadowman.com ansible_host=10.20.1.18
+
+[windows_psrp_credssp:vars]
+ansible_connection=psrp
+ansible_psrp_auth=credssp
+ansible_user=DomainUser
+ansible_password=StrongPassword
+
+############################################################
+# CLOUD SERVERS
+############################################################
+
+[aws]
+aws-linux01.example.com ansible_host=172.31.10.10
+aws-linux02.acme.com ansible_host=172.31.10.11
+aws-win01.shadowman.com ansible_host=172.31.10.12
+
+[azure]
+azure-linux01.example.com ansible_host=10.50.1.10
+azure-win01.acme.com ansible_host=10.50.1.11
+
+############################################################
+# NETWORK DEVICES
+############################################################
+
+[network:vars]
+ansible_connection=ansible.netcommon.network_cli
+ansible_user=ansible
+ansible_password=networkpassword
+
+############################################################
+# CISCO IOS-XE (100 devices)
+############################################################
+
+[cisco_ios]
+cisco01.example.com ansible_host=192.168.1.1
+cisco02.example.com ansible_host=192.168.1.2
+cisco03.acme.com ansible_host=192.168.1.3
+cisco04.shadowman.com ansible_host=192.168.1.4
+cisco05.example.com ansible_host=192.168.1.5
+
+[cisco_ios:vars]
+ansible_become=yes
+ansible_become_method=enable
+ansible_network_os=cisco.ios.ios
+os=IOS-XE
+version=16.9.1
+
+############################################################
+# ARISTA EOS (50 devices)
+############################################################
+
+[eos]
+arista01.example.com ansible_host=192.168.2.1
+arista02.example.com ansible_host=192.168.2.2
+arista03.acme.com ansible_host=192.168.2.3
+
+[eos:vars]
+ansible_connection=ansible.netcommon.network_cli
+ansible_network_os=arista.eos.eos
+ansible_become=yes
+ansible_become_method=enable
+
+############################################################
+# JUNIPER (50 devices)
+############################################################
+
+[juniper]
+juniper01.example.com ansible_host=192.168.3.1
+juniper02.acme.com ansible_host=192.168.3.2
+juniper03.shadowman.com ansible_host=192.168.3.3
+
+[juniper:vars]
+ansible_network_os=junipernetworks.junos.junos
+ansible_connection=ansible.netcommon.network_cli
+
+############################################################
+# F5 (40 devices)
+############################################################
+
+[f5]
+f501.example.com ansible_host=192.168.4.1
+f502.acme.com ansible_host=192.168.4.2
+f503.shadowman.com ansible_host=192.168.4.3
+
+[f5:vars]
+ansible_connection=ansible.netcommon.httpapi
+ansible_network_os=f5networks.f5_modules.bigip
+
+############################################################
+# FORTINET (40 devices)
+############################################################
+
+[fortinet]
+forti01.example.com ansible_host=192.168.5.1
+forti02.acme.com ansible_host=192.168.5.2
+forti03.shadowman.com ansible_host=192.168.5.3
+
+[fortinet:vars]
+ansible_connection=ansible.netcommon.httpapi
+ansible_network_os=fortinet.fortios.fortios
+
+############################################################
+# VYOS (20 devices)
+############################################################
+
+[vyos]
+vyos01.example.com ansible_host=192.168.6.1
+vyos02.acme.com ansible_host=192.168.6.2
+vyos03.shadowman.com ansible_host=192.168.6.3
+
+[vyos:vars]
+ansible_connection=ansible.netcommon.network_cli
+ansible_network_os=vyos.vyos.vyos
+ansible_user=my_vyos_user
+ansible_password=my_vyos_password
+
+############################################################
+# SWITCHES CHILD GROUP
+############################################################
+
+[switches:children]
+cisco_ios
+eos
+juniper
+vyos

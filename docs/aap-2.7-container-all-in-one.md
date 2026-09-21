@@ -120,7 +120,7 @@ O único requisito é informar as credenciais desejadas no inventory - o instala
 
 ### Mapeamento de Bancos de Dados
 
-Os nomes de database/usuário seguem o padrão da documentação Red Hat:
+> **Esta tabela é apenas informativa.** Neste modelo de instalação (host no grupo `[database]`) **o instalador controla tudo** - você não precisa criar nada manualmente. Ela serve para documentar o que será criado e para o caso de o banco ser **fornecido pela organização** (PostgreSQL gerenciado pelo time de infraestrutura, RDS, Azure Database, etc.), onde esses bancos e usuários passam a ser **pré-requisito**.
 
 | Database | Componente | Usuário |
 |----------|------------|---------|
@@ -133,6 +133,65 @@ Os nomes de database/usuário seguem o padrão da documentação Red Hat:
 | `lightspeed` | Ansible Lightspeed | `lightspeed` |
 
 > **Observação**: o usuário `ms_awx_readonly` também é criado pelo instalador - é o acesso somente-leitura que o Automation Metrics usa para ler o banco do Controller.
+
+### Quando o banco é fornecido pela organização
+
+Se o PostgreSQL **não** for instalado pelo AAP (banco externo já existente, gerenciado pela organização), o grupo `[database]` do inventory fica **vazio** e os itens acima deixam de ser automáticos. Nesse cenário o time de banco de dados precisa entregar, **antes da instalação**:
+
+1. Os **7 bancos** da tabela acima, cada um com seu **usuário/role dedicado** como owner;
+2. As extensões necessárias criadas previamente (`hstore` e `uuid-ossp` no banco `pulp`) - o instalador não terá permissão de superusuário para criá-las;
+3. O usuário somente-leitura `ms_awx_readonly` com `SELECT` no banco `awx` (usado pelo Automation Metrics);
+4. `scram-sha-256` habilitado e `max_connections` dimensionado para todos os serviços do host;
+5. Regras de acesso (`pg_hba.conf` / security group) liberando o host do AAP na porta 5432.
+
+Exemplo do que precisa existir no servidor de banco:
+
+```sql
+-- Um usuario e um banco por componente
+CREATE USER gateway                WITH PASSWORD 'senha';
+CREATE USER awx                    WITH PASSWORD 'senha';
+CREATE USER pulp                   WITH PASSWORD 'senha';
+CREATE USER eda                    WITH PASSWORD 'senha';
+CREATE USER eda_event_persistence  WITH PASSWORD 'senha';
+CREATE USER metrics_service        WITH PASSWORD 'senha';
+CREATE USER lightspeed             WITH PASSWORD 'senha';
+
+CREATE DATABASE gateway               OWNER gateway;
+CREATE DATABASE awx                   OWNER awx;
+CREATE DATABASE pulp                  OWNER pulp;
+CREATE DATABASE eda                   OWNER eda;
+CREATE DATABASE eda_event_persistence OWNER eda_event_persistence;
+CREATE DATABASE metrics_service       OWNER metrics_service;
+CREATE DATABASE lightspeed            OWNER lightspeed;
+
+-- Extensoes exigidas pelo Automation Hub (executar conectado ao banco pulp)
+\c pulp
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Acesso somente-leitura do Automation Metrics ao banco do Controller
+CREATE USER ms_awx_readonly WITH PASSWORD 'senha';
+\c awx
+GRANT CONNECT ON DATABASE awx TO ms_awx_readonly;
+GRANT USAGE ON SCHEMA public TO ms_awx_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ms_awx_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ms_awx_readonly;
+```
+
+Além disso, no inventory é necessário indicar que o banco é externo e que o instalador não deve gerenciá-lo:
+
+```ini
+[database]
+# vazio - PostgreSQL fornecido pela organizacao
+
+[all:vars]
+postgresql_admin_username=<usuario com permissao de criar schema>
+postgresql_admin_password='<senha>'
+# Nao tentar criar/remover bancos e roles
+postgresql_keep_databases=true
+```
+
+> Os `*_pg_host` de cada componente devem apontar para o endereço do banco da organização. Se a conexão exigir TLS, defina `<componente>_pg_sslmode=verify-full` e distribua a CA no host.
 
 ## Download do Instalador
 
@@ -324,17 +383,9 @@ hub_storage_backend=file
 hub_workers=2
 hub_seed_collections=false
 
-# Assinatura de collections e de containers (chave GPG gerada em
-# /home/ansible/aap-signing/aap-signing-key.asc, passphrase = redhat*99)
-hub_collection_signing=true
-hub_collection_auto_sign=true
-hub_collection_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
-hub_collection_signing_pass='redhat*99'
-hub_collection_signing_service=ansible-default
-hub_container_signing=true
-hub_container_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
-hub_container_signing_pass='redhat*99'
-hub_container_signing_service=container-default
+# Assinatura de collections/containers: OPCIONAL, nao habilitada aqui.
+# Exige gerar e distribuir uma chave GPG (ver "Apendice - Assinatura de
+# Collections e Containers (opcional)" no final do documento).
 
 # =============================================================================
 # AAP EDA Controller (Event-Driven Ansible)
@@ -473,14 +524,14 @@ receptor_log_level=info
 
 - `hub_storage_backend=file`: armazenamento local de artefatos (suficiente em nó único)
 - `hub_workers`: workers de conteúdo do Hub (opcional). `hub_api_workers` não é documentada e foi removida
-- `hub_collection_signing` / `hub_container_signing`: assinatura GPG de collections e de imagens de container
+- Assinatura de collections e containers **não** está habilitada neste inventory - é opcional e exige chave GPG (ver apêndice no final do documento)
 - `hub_seed_collections=false`: não popula o Hub com as collections certificadas (o seed demora bastante e consome disco)
 
 #### Variáveis do Event-Driven Ansible
 
 - `eda_type=hybrid`: API e worker de ativação no mesmo host
 - `eda_event_stream_mtls`: habilita event streams (webhooks externos) com autenticação mútua via Gateway
-- `eda_event_persistence_deploy_db`: cria o banco dedicado ao histórico de eventos
+- Persistência de eventos: deixada comentada - o banco dedicado é criado na instalação quando o recurso é usado, mas os nomes `eda_event_persistence_*` não constam no apêndice de variáveis do 2.7
 
 #### Variáveis do Automation Metrics
 
@@ -497,9 +548,11 @@ receptor_log_level=info
 
 > **Atenção com segredos**: as chaves de API (`lightspeed_chatbot_model_api_key`), senhas do registry e senhas de banco estão em texto plano no inventory. **Não versione este arquivo com valores reais** - use `ansible-vault encrypt` ou mantenha o inventory fora do repositório.
 
-## Geração da Chave de Assinatura (GPG)
+## Apêndice - Assinatura de Collections e Containers (opcional)
 
-Necessária para `hub_collection_signing` e `hub_container_signing`:
+A instalação do Hub acima é a **mínima**: banco, storage local e nada mais. A assinatura GPG de collections e de imagens de container é um recurso **opcional** e só deve ser habilitada se a organização exigir conteúdo assinado - ela adiciona a necessidade de gerar, proteger e distribuir uma chave privada.
+
+Para habilitar, gere a chave no host:
 
 ```bash
 mkdir -p /home/ansible/aap-signing && cd /home/ansible/aap-signing
@@ -520,6 +573,20 @@ gpg --batch --gen-key gpg-params
 gpg --list-secret-keys --keyid-format=long
 gpg --armor --export-secret-keys allanrafaelroque@gmail.com > aap-signing-key.asc
 chmod 600 aap-signing-key.asc
+```
+
+E só então acrescente ao inventory:
+
+```ini
+hub_collection_signing=true
+hub_collection_auto_sign=true
+hub_collection_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
+hub_collection_signing_pass='redhat*99'
+hub_collection_signing_service=ansible-default
+hub_container_signing=true
+hub_container_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
+hub_container_signing_pass='redhat*99'
+hub_container_signing_service=container-default
 ```
 
 ## Executar a Instalação

@@ -10,7 +10,7 @@
 - **Tipo de Instalação**: HA mínimo - 2 nós híbridos (todos os serviços replicados) + 1 nó de banco de dados dedicado
 - **Banco de dados**: PostgreSQL **instalado e gerenciado pelo instalador do AAP** no nó dedicado (grupo `[database]`)
 
-> **Importante**: esta é uma topologia de **laboratório** para simular alta disponibilidade com o menor número possível de máquinas. As topologias testadas e suportadas pela Red Hat estão em [Container topologies](https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/tested_deployment_models/container-topologies). Para um Enterprise suportado são necessários no mínimo 3 nós no control plane (por conta do Redis em modo cluster) e um load balancer externo.
+> **Importante**: esta é uma topologia de **laboratório** para simular alta disponibilidade com o menor número possível de máquinas. As topologias testadas e suportadas pela Red Hat estão em [Container topologies](https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/plan-assembly_overview_tested_deployment_models). Para um Enterprise suportado são necessários no mínimo 3 nós no control plane (por conta do Redis em modo cluster) e um load balancer externo.
 
 ### O que é "híbrido" nesta topologia
 
@@ -166,6 +166,8 @@ O único requisito é informar as credenciais desejadas no inventory - o instala
 
 ### Mapeamento de Bancos de Dados
 
+> **Esta tabela é apenas informativa.** Neste modelo de instalação (nó no grupo `[database]`) **o instalador controla tudo** - você não precisa criar nada manualmente. Ela serve para documentar o que será criado e para o caso de o banco ser **fornecido pela organização** (PostgreSQL gerenciado pelo time de infraestrutura, RDS, Azure Database, etc.), onde esses bancos e usuários passam a ser **pré-requisito**.
+
 | Database | Componente | Usuário |
 |----------|------------|---------|
 | `gateway` | Automation Gateway | `gateway` |
@@ -177,6 +179,65 @@ O único requisito é informar as credenciais desejadas no inventory - o instala
 | `lightspeed` | Ansible Lightspeed | `lightspeed` |
 
 > **Observação**: o usuário `ms_awx_readonly` também é criado pelo instalador - é o acesso somente-leitura que o Automation Metrics usa para ler o banco do Controller.
+
+### Quando o banco é fornecido pela organização
+
+Se o PostgreSQL **não** for instalado pelo AAP (banco externo já existente, gerenciado pela organização), o grupo `[database]` do inventory fica **vazio** e os itens acima deixam de ser automáticos. Nesse cenário o time de banco de dados precisa entregar, **antes da instalação**:
+
+1. Os **7 bancos** da tabela acima, cada um com seu **usuário/role dedicado** como owner;
+2. As extensões necessárias criadas previamente (`hstore` e `uuid-ossp` no banco `pulp`) - o instalador não terá permissão de superusuário para criá-las;
+3. O usuário somente-leitura `ms_awx_readonly` com `SELECT` no banco `awx` (usado pelo Automation Metrics);
+4. `scram-sha-256` habilitado e `max_connections` dimensionado para todos os serviços dos dois nós (mínimo recomendado: **1024**);
+5. Regras de acesso (`pg_hba.conf` / security group) liberando `aapha01` e `aapha02` na porta 5432.
+
+Exemplo do que precisa existir no servidor de banco:
+
+```sql
+-- Um usuario e um banco por componente
+CREATE USER gateway                WITH PASSWORD 'senha';
+CREATE USER awx                    WITH PASSWORD 'senha';
+CREATE USER pulp                   WITH PASSWORD 'senha';
+CREATE USER eda                    WITH PASSWORD 'senha';
+CREATE USER eda_event_persistence  WITH PASSWORD 'senha';
+CREATE USER metrics_service        WITH PASSWORD 'senha';
+CREATE USER lightspeed             WITH PASSWORD 'senha';
+
+CREATE DATABASE gateway               OWNER gateway;
+CREATE DATABASE awx                   OWNER awx;
+CREATE DATABASE pulp                  OWNER pulp;
+CREATE DATABASE eda                   OWNER eda;
+CREATE DATABASE eda_event_persistence OWNER eda_event_persistence;
+CREATE DATABASE metrics_service       OWNER metrics_service;
+CREATE DATABASE lightspeed            OWNER lightspeed;
+
+-- Extensoes exigidas pelo Automation Hub (executar conectado ao banco pulp)
+\c pulp
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Acesso somente-leitura do Automation Metrics ao banco do Controller
+CREATE USER ms_awx_readonly WITH PASSWORD 'senha';
+\c awx
+GRANT CONNECT ON DATABASE awx TO ms_awx_readonly;
+GRANT USAGE ON SCHEMA public TO ms_awx_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ms_awx_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ms_awx_readonly;
+```
+
+Além disso, no inventory é necessário indicar que o banco é externo e que o instalador não deve gerenciá-lo:
+
+```ini
+[database]
+# vazio - PostgreSQL fornecido pela organizacao
+
+[all:vars]
+postgresql_admin_username=<usuario com permissao de criar schema>
+postgresql_admin_password='<senha>'
+# Nao tentar criar/remover bancos e roles
+postgresql_keep_databases=true
+```
+
+> Os `*_pg_host` de cada componente devem apontar para o endereço do banco da organização. Se a conexão exigir TLS, defina `<componente>_pg_sslmode=verify-full` e distribua a CA nos dois nós.
 
 ### Portas de Firewall
 
@@ -227,7 +288,7 @@ inventory-ha
 #   PostgreSQL | Redis | Receptor | Performance Co-Pilot | metrics-utility
 #
 # Docs:
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-proc_installing_containerized_aap
 # =============================================================================
 
 # AAP Gateway
@@ -287,7 +348,7 @@ aapdb01.aroque.com.br ansible_host=192.168.100.25
 # =============================================================================
 # Common
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-general-inventory-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 ansible_user=ansible
 ansible_become=true
 ansible_become_method=sudo
@@ -307,21 +368,22 @@ redis_mode=standalone
 # Performance Co-Pilot (monitoramento do control plane) - portas 44321/44322
 setup_monitoring=true
 
-# Tuning de kernel/limits do host para concorrencia
-tune_host_limits=true
+# Tuning de kernel/limits do host. Nao consta no apendice de variaveis do 2.7 -
+# confirme no README.md do installer antes de usar.
+# tune_host_limits=true
 
 # Timeout HTTP do usuario final
 client_request_timeout=30
 
-# Automation Dashboard (novo no 2.7): a coleta/UI vem DESABILITADA por default.
-# A flag e propagada para gateway/controller/metrics e cria as tabelas de
-# dashboard_reports no banco metrics_service durante a migracao.
-feature_flags={"FEATURE_DASHBOARD_COLLECTION_ENABLED": True}
+# Automation Dashboard: no 2.7 a coleta e habilitada por DEFAULT quando existe
+# um host no grupo [automationmetrics] - nao existe variavel para liga-la.
+# Para expor a pagina de feature flags na UI do gateway:
+# gateway_extra_settings=[{"setting": "RUNTIME_FEATURE_FLAGS", "value": "@bool True"}]
 
 # =============================================================================
 # PostgreSQL (instalado pelo installer em aapdb01)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-database-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 postgresql_admin_username=postgres
 postgresql_admin_password='redhat*99'
 postgresql_port=5432
@@ -332,7 +394,7 @@ postgresql_keep_databases=false
 # =============================================================================
 # AAP Gateway  -> https://aap.aroque.com.br (VIP do load balancer)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-gateway-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 gateway_admin_user=admin
 gateway_admin_password='redhat*99'
 gateway_main_url=https://aap.aroque.com.br
@@ -350,7 +412,7 @@ gateway_grpc_server_processes=5
 # =============================================================================
 # AAP Controller
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-controller-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 controller_admin_user=admin
 controller_admin_password='redhat*99'
 controller_pg_host=aapdb01.aroque.com.br
@@ -360,7 +422,6 @@ controller_pg_password='redhat*99'
 controller_pg_port=5432
 # Percentual de memoria do host reservado para capacidade de jobs
 controller_percent_memory_capacity=0.5
-controller_uwsgi_processes=8
 controller_event_workers=8
 controller_create_preload_data=true
 
@@ -382,39 +443,29 @@ metrics_utility_extra_settings=[{"setting": "METRICS_UTILITY_SHIP_TARGET", "valu
 # =============================================================================
 # AAP Automation Hub
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-hub-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 hub_admin_password='redhat*99'
 hub_pg_host=aapdb01.aroque.com.br
 hub_pg_database=pulp
 hub_pg_username=pulp
 hub_pg_password='redhat*99'
 hub_pg_port=5432
-hub_workers=2
-hub_api_workers=4
 hub_seed_collections=false
 
 # Storage local: valido porque o Hub roda em um unico no. Se adicionar
-# aapha02 ao grupo [automationhub], descomente o storage compartilhado:
+# aapha02 ao grupo [automationhub], e obrigatorio storage compartilhado:
 hub_storage_backend=file
 # hub_shared_data_path=192.168.100.26:/exports/hub
 # hub_shared_data_mount_opts=rw,sync,hard
 
-# Assinatura de collections e de containers (chave GPG gerada em
-# /home/ansible/aap-signing/aap-signing-key.asc, passphrase = redhat*99)
-hub_collection_signing=true
-hub_collection_auto_sign=true
-hub_collection_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
-hub_collection_signing_pass='redhat*99'
-hub_collection_signing_service=ansible-default
-hub_container_signing=true
-hub_container_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
-hub_container_signing_pass='redhat*99'
-hub_container_signing_service=container-default
+# Assinatura de collections/containers: OPCIONAL, nao habilitada aqui.
+# Exige gerar e distribuir uma chave GPG (ver "Apendice - Assinatura de
+# Collections e Containers (opcional)" no final do documento).
 
 # =============================================================================
 # AAP EDA Controller (Event-Driven Ansible)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#event-driven-ansible-controller
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 eda_admin_password='redhat*99'
 eda_pg_host=aapdb01.aroque.com.br
 eda_pg_database=eda
@@ -431,35 +482,35 @@ eda_event_stream_mtls=true
 eda_event_stream_pg_username=eda_event_stream
 eda_event_stream_pg_password='redhat*99'
 
-# Persistencia de eventos (banco dedicado para historico de eventos)
-eda_event_persistence_deploy_db=true
-eda_event_persistence_pg_database=eda_event_persistence
-eda_event_persistence_pg_username=eda_event_persistence
-eda_event_persistence_pg_password='redhat*99'
+# Persistencia de eventos: o banco dedicado e criado pelo installer quando o
+# recurso e usado. Os nomes de variavel abaixo NAO constam no apendice de
+# variaveis do 2.7 - confirme no README.md do installer antes de habilitar.
+# eda_event_persistence_deploy_db=true
+# eda_event_persistence_pg_database=eda_event_persistence
+# eda_event_persistence_pg_username=eda_event_persistence
+# eda_event_persistence_pg_password='redhat*99'
 
 # =============================================================================
 # AAP Automation Metrics Service (dashboard / analytics)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 automationmetrics_pg_host=aapdb01.aroque.com.br
 automationmetrics_pg_database=metrics_service
 automationmetrics_pg_username=metrics_service
 automationmetrics_pg_password='redhat*99'
 automationmetrics_pg_port=5432
-# Acesso somente-leitura ao banco do Controller (usuario criado pelo installer)
-automationmetrics_controller_db=awx
-automationmetrics_controller_pg_username=ms_awx_readonly
+# Acesso somente-leitura ao banco do Controller (usuario ms_awx_readonly criado
+# pelo installer). Os nomes seguem o padrao automationmetrics_controller_read_*
 automationmetrics_controller_read_pg_host=aapdb01.aroque.com.br
+automationmetrics_controller_read_pg_database=awx
+automationmetrics_controller_read_pg_username=ms_awx_readonly
 automationmetrics_controller_read_pg_password='redhat*99'
-automationmetrics_controller_read_pg_port=5432
-automationmetrics_gunicorn_workers=4
-automationmetrics_dispatcherd_workers=2
 automationmetrics_skip_install=false
 
 # =============================================================================
 # Ansible Lightspeed (assistant)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-lightspeed-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 lightspeed_admin_user=admin
 lightspeed_admin_password='redhat*99'
 lightspeed_pg_host=aapdb01.aroque.com.br
@@ -467,7 +518,6 @@ lightspeed_pg_database=lightspeed
 lightspeed_pg_username=lightspeed
 lightspeed_pg_password='redhat*99'
 lightspeed_pg_port=5432
-lightspeed_uwsgi_processes=4
 
 # --- Chatbot (requer um endpoint de modelo: RHOAI / OpenAI / Azure) ----------
 # Sem estas 3 variaveis o Lightspeed sobe SEM o chatbot. Descomente e preencha
@@ -489,15 +539,14 @@ lightspeed_uwsgi_processes=4
 # =============================================================================
 # Ansible MCP Server
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars
-mcp_public_base_url=https://aap.aroque.com.br
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 mcp_allow_write_operations=true
 mcp_ignore_certificate_errors=false
 
 # =============================================================================
 # Receptor (mesh entre os dois nos hibridos)
 # =============================================================================
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-receptor-variables
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 receptor_port=27199
 receptor_protocol=tcp
 receptor_log_level=info
@@ -512,8 +561,8 @@ receptor_log_level=info
 - `registry_ns_aap`: namespace das imagens da versão 2.7 (`ansible-automation-platform-27`)
 - `redis_mode`: **`standalone`** porque 2 nós não formam quorum de cluster Redis (mínimo 3)
 - `setup_monitoring`: instala o Performance Co-Pilot para métricas do control plane
-- `tune_host_limits`: ajusta limites de kernel/ulimits do host para concorrência
-- `feature_flags`: habilita a coleta do novo **Automation Dashboard** do 2.7 (vem desabilitada por padrão)
+- `tune_host_limits`: ajusta limites de kernel/ulimits do host. **Não consta no apêndice de variáveis do 2.7** - deixada comentada; confirme no `README.md` do instalador antes de usar
+- Automation Dashboard: a coleta é habilitada **por padrão** quando existe um host no grupo `[automationmetrics]` - não há variável `automationmetrics_enabled` nem flag de inventory para ligá-la. A página de feature flags na UI é exposta via `gateway_extra_settings` com `RUNTIME_FEATURE_FLAGS`
 
 #### Variáveis do PostgreSQL
 
@@ -532,7 +581,7 @@ receptor_log_level=info
 #### Variáveis do Automation Controller
 
 - `controller_percent_memory_capacity`: percentual de memória do host reservado para capacidade de jobs (0.5 = 50%)
-- `controller_uwsgi_processes` / `controller_event_workers`: workers de API e de processamento de eventos de job
+- `controller_event_workers`: workers de processamento de eventos de job. `controller_uwsgi_processes` **não é documentada** no 2.7 (só existe `gateway_uwsgi_processes`) e foi removida
 - `controller_create_preload_data`: cria a organização e o inventário de demonstração
 - `metrics_utility_*`: coleta e geração de relatórios de consumo (CCSPv2) para o Automation Analytics
 - `controller_license_file`: aplica o manifest de subscription automaticamente durante a instalação
@@ -540,8 +589,9 @@ receptor_log_level=info
 #### Variáveis do Automation Hub
 
 - `hub_storage_backend=file`: armazenamento local de artefatos, válido porque o Hub roda em nó único. Com 2 nós de Hub, `hub_shared_data_path` (NFS) ou um backend `s3`/`azure` passa a ser obrigatório
-- `hub_collection_signing` / `hub_container_signing`: assinatura GPG de collections e de imagens de container
 - `hub_seed_collections`: se `true`, popula o Hub com as collections certificadas (demora bastante)
+- Assinatura de collections e containers **não** está habilitada neste inventory - é opcional e exige chave GPG (ver apêndice no final do documento)
+- `hub_workers` / `hub_api_workers`: omitidos de propósito. O instalador calcula os workers a partir dos recursos do nó; só defina se houver necessidade de tuning
 
 #### Variáveis do Event-Driven Ansible
 
@@ -551,18 +601,19 @@ receptor_log_level=info
 
 #### Variáveis do Automation Metrics
 
-- `automationmetrics_controller_pg_username=ms_awx_readonly`: usuário somente-leitura criado pelo instalador para o Metrics ler o banco do Controller
-- `automationmetrics_gunicorn_workers` / `automationmetrics_dispatcherd_workers`: workers de API e de processamento assíncrono
+- `automationmetrics_controller_read_pg_host` / `_read_pg_database` / `_read_pg_username` / `_read_pg_password`: conexão somente-leitura ao banco do Controller. O usuário `ms_awx_readonly` é criado pelo instalador. Não existe `automationmetrics_controller_read_pg_port`
+- Workers do Metrics: não há variáveis de inventory para isso. As opcionais documentadas são `automationmetrics_pg_port`, `automationmetrics_api_port` (8006), `automationmetrics_nginx_http_port` (8087), `automationmetrics_nginx_https_port` (8450) e `automationmetrics_pg_cert_auth`
 
 #### Variáveis do Lightspeed e MCP
 
 - `lightspeed_chatbot_model_url` / `_model_id` / `_model_api_key`: os três são obrigatórios para subir o chatbot - sem eles o Lightspeed sobe apenas com o assistente
-- `mcp_public_base_url`: URL pública usada pelo MCP Server para montar os endpoints
 - `mcp_allow_write_operations`: permite que clientes MCP executem operações de escrita no AAP
 
-## Geração da Chave de Assinatura (GPG)
+## Apêndice - Assinatura de Collections e Containers (opcional)
 
-Necessária para `hub_collection_signing` e `hub_container_signing`. Executar no nó instalador:
+A instalação do Hub acima é a **mínima**: banco, storage local e nada mais. A assinatura GPG de collections e de imagens de container é um recurso **opcional** e só deve ser habilitada se a organização exigir conteúdo assinado - ela adiciona a necessidade de gerar, proteger e distribuir uma chave privada.
+
+Para habilitar, gere a chave no nó instalador:
 
 ```bash
 mkdir -p /home/ansible/aap-signing && cd /home/ansible/aap-signing
@@ -583,6 +634,20 @@ gpg --batch --gen-key gpg-params
 gpg --list-secret-keys --keyid-format=long
 gpg --armor --export-secret-keys allanrafaelroque@gmail.com > aap-signing-key.asc
 chmod 600 aap-signing-key.asc
+```
+
+E só então acrescente ao inventory:
+
+```ini
+hub_collection_signing=true
+hub_collection_auto_sign=true
+hub_collection_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
+hub_collection_signing_pass='redhat*99'
+hub_collection_signing_service=ansible-default
+hub_container_signing=true
+hub_container_signing_key=/home/ansible/aap-signing/aap-signing-key.asc
+hub_container_signing_pass='redhat*99'
+hub_container_signing_service=container-default
 ```
 
 ## Executar a Instalação
@@ -707,27 +772,14 @@ ansible-playbook -i inventory-ha ansible.containerized_installer.uninstall
 | Documento | Descrição | Link |
 |-----------|-----------|------|
 | **Portal da documentação 2.7** | Índice de todos os guias da versão | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7 |
-| **Planning your installation** | Requisitos de sistema, topologias e decisões de arquitetura antes de instalar | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/planning_your_installation |
-| **Containerized installation** | Guia principal da instalação containerizada (o método usado nesta documentação) | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation |
-| **Appendix: Inventory file variables** | Referência completa de **todas** as variáveis do inventory, por componente | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars |
-| **Tested deployment models - Container topologies** | Topologias testadas e suportadas pela Red Hat, com o hardware homologado | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/tested_deployment_models/container-topologies |
-| **Release notes 2.7** | Novidades da versão, recursos descontinuados e problemas conhecidos | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/release_notes |
-| **RPM installation** | Método alternativo de instalação, via RPM | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/rpm_installation |
+| **Planning your installation** | Requisitos de sistema, topologias e decisões de arquitetura antes de instalar | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-ref_cont_aap_system_requirements |
+| **Containerized installation** | Guia principal da instalação containerizada (o método usado nesta documentação) | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-proc_installing_containerized_aap |
+| **Appendix: Inventory file variables** | Referência completa de **todas** as variáveis do inventory, por componente | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars |
+| **Tested deployment models - Container topologies** | Topologias testadas e suportadas pela Red Hat, com o hardware homologado | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/plan-assembly_overview_tested_deployment_models |
+| **Release notes 2.7** | Novidades da versão, recursos descontinuados e problemas conhecidos | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/whats_new-new_features_and_enhancements |
+| **RPM installation** | Método alternativo de instalação, via RPM | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-con_choosing_installation_type |
 
-### Referências por Componente do Inventory
-
-| Componente | Seção do Appendix |
-|------------|-------------------|
-| Variáveis gerais | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-general-inventory-variables |
-| PostgreSQL | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-database-variables |
-| Automation Gateway | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-gateway-variables |
-| Automation Controller | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-controller-variables |
-| Automation Hub | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-hub-variables |
-| Event-Driven Ansible | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#event-driven-ansible-controller |
-| Ansible Lightspeed | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-lightspeed-variables |
-| Receptor | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/containerized_installation/appendix-inventory-files-vars#ref-receptor-variables |
-
-> **Nota**: as âncoras (`#ref-...`) podem mudar entre releases da documentação. Se um link direto não abrir na seção esperada, use o Appendix completo e navegue pelo índice lateral.
+> **Nota**: no 2.7 a documentação foi reestruturada - todas as variáveis de inventory (gerais, PostgreSQL, gateway, controller, hub, EDA, metrics, Lightspeed, MCP, receptor e Redis) ficam em uma única página: [Inventory file variables](https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars). Os antigos links `.../html/containerized_installation/appendix-inventory-files-vars#ref-...` retornam 404.
 
 ### Portal do Cliente e Console
 

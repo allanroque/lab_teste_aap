@@ -7,6 +7,7 @@
 - **Memória**: 17GB
 - **Armazenamento**: 150GB
 - **Versão do AAP**: 2.7 Containerizado
+- **Método de instalação**: **bundle** (`Containerized Setup Bundle`) - imagens e collections vêm no pacote, sem necessidade de acesso ao `registry.redhat.io`
 - **Tipo de Instalação**: All-in-One (topologia *Growth*) - todos os serviços, incluindo o PostgreSQL, em um único nó
 - **Banco de dados**: PostgreSQL **instalado e gerenciado pelo instalador do AAP** no próprio nó
 
@@ -193,16 +194,29 @@ postgresql_keep_databases=true
 
 > Os `*_pg_host` de cada componente devem apontar para o endereço do banco da organização. Se a conexão exigir TLS, defina `<componente>_pg_sslmode=verify-full` e distribua a CA no host.
 
-## Download do Instalador
+## Download do Instalador (bundle)
 
-Baixar o **Ansible Automation Platform 2.7 Containerized Setup** no [Red Hat Customer Portal](https://access.redhat.com/downloads/content/480) e extrair no host:
+Esta documentação usa o **pacote bundle** (`Ansible Automation Platform 2.7 Containerized Setup Bundle`), disponível no [Red Hat Customer Portal](https://access.redhat.com/downloads/content/480). O bundle traz **todas as imagens de container e collections dentro do pacote**, então a instalação não precisa de acesso ao `registry.redhat.io` nem de credenciais de registry - o que evita depender de liberação de firewall/proxy para o registry da Red Hat.
+
+Extrair no host:
 
 ```bash
 # Como usuário ansible
-tar -xzvf ansible-automation-platform-containerized-setup-2.7-x.tar.gz
-cd ansible-automation-platform-containerized-setup-2.7-x
+tar -xzvf ansible-automation-platform-containerized-setup-bundle-2.7-x-x86_64.tar.gz
+cd ansible-automation-platform-containerized-setup-bundle-2.7-x-x86_64
 ls -l
 ```
+
+Confirmar que o diretório `bundle/` veio completo - é dele que o installer carrega tudo:
+
+```bash
+ls -la bundle/
+# esperado:
+#   collections/   <- collections do Ansible usadas pelo installer
+#   images/        <- imagens de container em .tar
+```
+
+> **Atenção - dependências de RPM**: o bundle **não** inclui os RPMs de BaseOS/AppStream (podman, python, etc.). O installer usa o `dnf` do host, então é necessário ter os repositórios do RHEL acessíveis via RHSM, Satellite, `reposync` local ou ISO montada.
 
 ## Arquivo de Inventory
 
@@ -281,12 +295,13 @@ aap01.aroque.com.br
 # https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars
 ansible_connection=local
 
-# Credenciais do registry (registry.redhat.io) - OBRIGATORIO PREENCHER
-registry_username=XXXXXXXXXX
-registry_password='redhat*99'
-registry_url=registry.redhat.io
-registry_ns_aap=ansible-automation-platform-27
-registry_tls_verify=true
+# Instalacao via BUNDLE (offline): todas as imagens e collections vem no
+# proprio pacote, nao ha acesso ao registry.redhat.io.
+# NAO definir registry_username / registry_password - se qualquer uma das duas
+# estiver presente o installer tenta autenticar no registry e falha.
+bundle_install=true
+# O caminho DEVE terminar em /bundle (PWD = diretorio do installer extraido)
+bundle_dir='{{ lookup("ansible.builtin.env", "PWD") }}/bundle'
 
 # Redis em modo standalone (obrigatorio para topologia all-in-one)
 redis_mode=standalone
@@ -489,8 +504,9 @@ receptor_log_level=info
 #### Variáveis Comuns
 
 - `ansible_connection=local`: a instalação é executada no próprio host, sem SSH
-- `registry_username` / `registry_password`: credenciais do `registry.redhat.io`
-- `registry_ns_aap`: namespace das imagens da versão 2.7 (`ansible-automation-platform-27`)
+- `bundle_install=true`: instalação a partir do bundle - o installer carrega as imagens de `bundle/images/` em vez de baixar do `registry.redhat.io`
+- `bundle_dir`: caminho do diretório do bundle. **Precisa terminar em `/bundle`**; o `lookup` de `PWD` resolve para o diretório do installer extraído
+- `registry_username` / `registry_password`: **não são usadas** e não devem aparecer no inventory - basta uma delas estar definida para o installer tentar autenticar no registry e falhar. `registry_url`, `registry_ns_aap` e `registry_tls_verify` também são dispensáveis no bundle (valem os defaults: `registry.redhat.io` e `ansible-automation-platform-27`)
 - `redis_mode=standalone`: **obrigatório** no all-in-one - o modo cluster exige no mínimo 3 nós
 - `setup_monitoring`: instala o Performance Co-Pilot para métricas do control plane
 - `tune_host_limits`: ajusta limites de kernel/ulimits do host. **Não consta no apêndice de variáveis do 2.7** - deixada comentada; confirme no `README.md` do instalador antes de usar
@@ -546,7 +562,7 @@ receptor_log_level=info
 - `lightspeed_mcp_controller_enabled` / `lightspeed_mcp_lightspeed_enabled`: ferramentas MCP do chatbot - exigem `lightspeed_chatbot_model_url` definido
 - `mcp_allow_write_operations`: permite que clientes MCP executem operações de escrita no AAP
 
-> **Atenção com segredos**: as chaves de API (`lightspeed_chatbot_model_api_key`), senhas do registry e senhas de banco estão em texto plano no inventory. **Não versione este arquivo com valores reais** - use `ansible-vault encrypt` ou mantenha o inventory fora do repositório.
+> **Atenção com segredos**: as chaves de API (`lightspeed_chatbot_model_api_key`) e as senhas de banco e de admin estão em texto plano no inventory. **Não versione este arquivo com valores reais** - use `ansible-vault encrypt` ou mantenha o inventory fora do repositório.
 
 ## Apêndice - Assinatura de Collections e Containers (opcional)
 
@@ -591,7 +607,7 @@ hub_container_signing_service=container-default
 
 ## Executar a Instalação
 
-A partir do diretório do instalador, logado como `ansible`:
+A partir do diretório do instalador **extraído do bundle** (o `bundle_dir` usa `PWD`, portanto o `ansible-playbook` precisa ser executado de dentro dele), logado como `ansible`:
 
 ```bash
 ansible-playbook -i inventory-growth ansible.containerized_installer.install -vv --ask-become-pass
@@ -696,6 +712,23 @@ podman ps | grep lightspeed
 podman logs lightspeed-chatbot
 ```
 
+### Installer tentando baixar imagens do registry.redhat.io
+
+Em instalação por bundle isso acontece quando `registry_username` ou `registry_password` ficaram no inventory - basta uma delas estar definida para o installer tentar autenticar no registry. Remova as duas e confirme `bundle_install=true`.
+
+Outro motivo é `bundle_dir` apontando para o lugar errado: o caminho **precisa terminar em `/bundle`** e o `lookup` de `PWD` só resolve se o `ansible-playbook` for executado de dentro do diretório do installer. Para descartar dúvida, use caminho absoluto:
+
+```ini
+bundle_dir=/home/ansible/ansible-automation-platform-containerized-setup-bundle-2.7-x-x86_64/bundle
+```
+
+Validar o conteúdo antes de reexecutar:
+
+```bash
+ls bundle/images/ | head
+ls bundle/collections/ | head
+```
+
 ### Coletar logs
 
 ```bash
@@ -720,6 +753,7 @@ ansible-playbook -i inventory-growth ansible.containerized_installer.uninstall
 | **Planning your installation** | Requisitos de sistema, topologias e decisões de arquitetura antes de instalar | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-ref_cont_aap_system_requirements |
 | **Containerized installation** | Guia principal da instalação containerizada (o método usado nesta documentação) | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-proc_installing_containerized_aap |
 | **Appendix: Inventory file variables** | Referência completa de **todas** as variáveis do inventory, por componente | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_appendix_inventory_file_vars |
+| **Disconnected (bundled) installation** | Instalação por bundle: variáveis `bundle_install`/`bundle_dir` e dependências de RPM | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-assembly_aap_containerized_disconnected_installation |
 | **Tested deployment models - Container topologies** | Topologias testadas e suportadas pela Red Hat, com o hardware homologado | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/plan-assembly_overview_tested_deployment_models |
 | **Release notes 2.7** | Novidades da versão, recursos descontinuados e problemas conhecidos | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/whats_new-new_features_and_enhancements |
 | **RPM installation** | Método alternativo de instalação, via RPM | https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/install-con_choosing_installation_type |

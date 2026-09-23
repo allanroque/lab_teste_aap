@@ -160,7 +160,7 @@ Nesta topologia **não criamos os bancos previamente**. O servidor `aapdb01.aroq
 
 1. Instala o PostgreSQL containerizado no nó;
 2. Cria os usuários e os bancos de cada componente;
-3. Aplica as extensões necessárias (`hstore`, `uuid-ossp` para o Hub);
+3. Aplica a extensão exigida pelo Automation Hub (`hstore`);
 4. Executa as migrações de schema.
 
 O único requisito é informar as credenciais desejadas no inventory - o instalador se encarrega do resto.
@@ -186,7 +186,7 @@ O único requisito é informar as credenciais desejadas no inventory - o instala
 Se o PostgreSQL **não** for instalado pelo AAP (banco externo já existente, gerenciado pela organização), o grupo `[database]` do inventory fica **vazio** e os itens acima deixam de ser automáticos. Nesse cenário o time de banco de dados precisa entregar, **antes da instalação**:
 
 1. Os **7 bancos** da tabela acima, cada um com seu **usuário/role dedicado** como owner;
-2. As extensões necessárias criadas previamente (`hstore` e `uuid-ossp` no banco `pulp`) - o instalador não terá permissão de superusuário para criá-las;
+2. A extensão `hstore` criada previamente no banco `pulp` - é a única exigida pelo Hub e, sem ela, a migração do banco falha. O instalador pode não ter permissão de superusuário para criá-la;
 3. O usuário somente-leitura `ms_awx_readonly` com `SELECT` no banco `awx` (usado pelo Automation Metrics);
 4. `scram-sha-256` habilitado e `max_connections` dimensionado para todos os serviços dos dois nós (mínimo recomendado: **1024**);
 5. Regras de acesso (`pg_hba.conf` / security group) liberando `aapha01` e `aapha02` na porta 5432.
@@ -200,7 +200,7 @@ CREATE USER awx                    WITH PASSWORD 'senha';
 CREATE USER pulp                   WITH PASSWORD 'senha';
 CREATE USER eda                    WITH PASSWORD 'senha';
 CREATE USER eda_event_persistence  WITH PASSWORD 'senha';
-CREATE USER metrics_service        WITH PASSWORD 'senha';
+CREATE USER metrics_service        WITH PASSWORD 'senha' CREATEDB;  -- CREATEDB exigido nas migracoes
 CREATE USER lightspeed             WITH PASSWORD 'senha';
 
 CREATE DATABASE gateway               OWNER gateway;
@@ -211,10 +211,9 @@ CREATE DATABASE eda_event_persistence OWNER eda_event_persistence;
 CREATE DATABASE metrics_service       OWNER metrics_service;
 CREATE DATABASE lightspeed            OWNER lightspeed;
 
--- Extensoes exigidas pelo Automation Hub (executar conectado ao banco pulp)
+-- Extensao exigida pelo Automation Hub (executar conectado ao banco pulp)
 \c pulp
 CREATE EXTENSION IF NOT EXISTS hstore;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Acesso somente-leitura do Automation Metrics ao banco do Controller
 CREATE USER ms_awx_readonly WITH PASSWORD 'senha';
@@ -709,15 +708,38 @@ Listar todos os bancos criados pelo instalador:
 sudo -u postgres psql -c "\l" | grep -E 'gateway|awx|pulp|eda|metrics_service|lightspeed'
 ```
 
+Esperado: `gateway`, `awx`, `pulp`, `eda` e `metrics_service`. O banco `lightspeed` só existe se o Lightspeed tiver sido instalado (grupo `[ansiblelightspeed]` preenchido).
+
 ### Validar o Status do Gateway e do Mesh
 
 ```bash
-# Status geral da plataforma
-curl -sk https://aap.aroque.com.br/api/gateway/v1/status/ | python3 -m json.tool
-
-# Estado do mesh Receptor entre os dois nós
-podman exec -it receptor receptorctl status
+# Status geral da plataforma (use o FQDN do SEU ambiente, o mesmo de gateway_main_url)
+export AAP_HOST=aap.aroque.com.br
+curl -sk https://$AAP_HOST/api/gateway/v1/status/ | python3 -m json.tool
 ```
+
+> Resposta `Expecting value: line 1 column 1 (char 0)` significa que o `curl` não recebeu JSON - normalmente hostname errado, DNS ou proxy no caminho. Diagnostique com `curl -vk https://$AAP_HOST/api/gateway/v1/status/`.
+
+Estado do mesh Receptor entre os dois nós.
+
+> **Não use `receptorctl`.** Na instalação containerizada do AAP 2.7 esse utilitário **não existe** nas imagens (nem no container `receptor`, nem no `automation-controller-task`). O retorno *"executable file receptorctl not found in $PATH"* **não indica problema no mesh**.
+
+```bash
+# Em cada no hibrido: container Up e unit active
+podman ps --filter name=receptor --format "table {{.Names}}\t{{.Status}}"
+systemctl --user status receptor.service --no-pager
+
+# Logs sem erro recorrente de conexao com o peer
+podman logs --tail 30 receptor
+```
+
+A validação que importa é a visão do mesh no Controller - os **dois nós** devem aparecer `Ready`, com capacidade, em **Automation Controller → Instances** (e no *Topology viewer*). Pela API:
+
+```bash
+curl -sk -u admin:'<senha>' https://$AAP_HOST/api/controller/v1/instances/ | python3 -m json.tool
+```
+
+Esperado: duas instâncias `"node_type": "hybrid"`, ambas com `"enabled": true` e `capacity` maior que zero. Confirmação definitiva: executar um job template e vê-lo concluir - é o Receptor que transporta a execução entre os nós.
 
 ### Validar o Failover (simulação de HA)
 

@@ -114,7 +114,7 @@ Nesta topologia **não criamos os bancos previamente**. O próprio host está de
 
 1. Instala o PostgreSQL containerizado no nó;
 2. Cria os usuários e os bancos de cada componente;
-3. Aplica as extensões necessárias (`hstore`, `uuid-ossp` para o Hub);
+3. Aplica a extensão exigida pelo Automation Hub (`hstore`);
 4. Executa as migrações de schema.
 
 O único requisito é informar as credenciais desejadas no inventory - o instalador se encarrega do resto.
@@ -140,7 +140,7 @@ O único requisito é informar as credenciais desejadas no inventory - o instala
 Se o PostgreSQL **não** for instalado pelo AAP (banco externo já existente, gerenciado pela organização), o grupo `[database]` do inventory fica **vazio** e os itens acima deixam de ser automáticos. Nesse cenário o time de banco de dados precisa entregar, **antes da instalação**:
 
 1. Os **7 bancos** da tabela acima, cada um com seu **usuário/role dedicado** como owner;
-2. As extensões necessárias criadas previamente (`hstore` e `uuid-ossp` no banco `pulp`) - o instalador não terá permissão de superusuário para criá-las;
+2. A extensão `hstore` criada previamente no banco `pulp` - é a única exigida pelo Hub e, sem ela, a migração do banco falha. O instalador pode não ter permissão de superusuário para criá-la;
 3. O usuário somente-leitura `ms_awx_readonly` com `SELECT` no banco `awx` (usado pelo Automation Metrics);
 4. `scram-sha-256` habilitado e `max_connections` dimensionado para todos os serviços do host;
 5. Regras de acesso (`pg_hba.conf` / security group) liberando o host do AAP na porta 5432.
@@ -154,7 +154,7 @@ CREATE USER awx                    WITH PASSWORD 'senha';
 CREATE USER pulp                   WITH PASSWORD 'senha';
 CREATE USER eda                    WITH PASSWORD 'senha';
 CREATE USER eda_event_persistence  WITH PASSWORD 'senha';
-CREATE USER metrics_service        WITH PASSWORD 'senha';
+CREATE USER metrics_service        WITH PASSWORD 'senha' CREATEDB;  -- CREATEDB exigido nas migracoes
 CREATE USER lightspeed             WITH PASSWORD 'senha';
 
 CREATE DATABASE gateway               OWNER gateway;
@@ -165,10 +165,9 @@ CREATE DATABASE eda_event_persistence OWNER eda_event_persistence;
 CREATE DATABASE metrics_service       OWNER metrics_service;
 CREATE DATABASE lightspeed            OWNER lightspeed;
 
--- Extensoes exigidas pelo Automation Hub (executar conectado ao banco pulp)
+-- Extensao exigida pelo Automation Hub (executar conectado ao banco pulp)
 \c pulp
 CREATE EXTENSION IF NOT EXISTS hstore;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Acesso somente-leitura do Automation Metrics ao banco do Controller
 CREATE USER ms_awx_readonly WITH PASSWORD 'senha';
@@ -619,6 +618,14 @@ O parâmetro `-vv` habilita modo verbose para acompanhar o progresso da instala�
 
 ## Testes de Validação
 
+> **Antes de começar**: os comandos abaixo usam `$AAP_HOST`. Exporte o FQDN **do seu ambiente** (o mesmo valor de `gateway_main_url` no inventory) - não use o hostname de exemplo desta documentação:
+>
+> ```bash
+> export AAP_HOST=aap01.aroque.com.br   # troque pelo FQDN do seu servidor
+> ```
+>
+> Os componentes opcionais (Lightspeed, MCP Server, Performance Co-Pilot e metrics-utility) só aparecem nas validações se tiverem sido habilitados no inventory. A ausência deles **não é erro** - é reflexo do que foi instalado.
+
 ### Verificar os Containers
 
 ```bash
@@ -626,7 +633,15 @@ podman ps --format "table {{.Names}}\t{{.Status}}"
 systemctl --user list-units 'automation-*' --no-pager
 ```
 
-Serviços esperados: `automation-gateway`, `automation-controller-*`, `automation-hub-*`, `automation-eda-*`, `automation-metrics-*`, `lightspeed-*`, `ansible-mcp`, `postgresql`, `redis`, `receptor`.
+Containers esperados na instalação base: `postgresql`, `redis-unix`, `redis-tcp`, `automation-gateway`, `automation-gateway-proxy`, `receptor`, `automation-controller-{web,task,rsyslog}`, `automation-hub-{api,content,web,worker-1,worker-2}`, `automation-eda-{api,daphne,web,worker-*,activation-worker-*}`, `automation-metrics-{web,tasks,scheduler}`.
+
+Só aparecem se habilitados no inventory:
+
+| Container | Depende de |
+|-----------|-----------|
+| `automation-lightspeed-*` | host no grupo `[ansiblelightspeed]` |
+| `ansible-mcp` | host no grupo `[ansiblemcp]` |
+| `automation-controller-metrics-utility` | `metrics_utility_enabled=true` |
 
 ### Validar os Bancos Criados pelo Instalador
 
@@ -634,36 +649,107 @@ Serviços esperados: `automation-gateway`, `automation-controller-*`, `automatio
 podman exec -it postgresql psql -U postgres -c "\l" | grep -E 'gateway|awx|pulp|eda|metrics_service|lightspeed'
 ```
 
-Validar as extensões do Hub:
+Esperado: `gateway`, `awx`, `pulp`, `eda` e `metrics_service`. O banco `lightspeed` só existe se o Lightspeed tiver sido instalado.
+
+Validar a extensão exigida pelo Automation Hub:
 
 ```bash
 podman exec -it postgresql psql -U postgres -d pulp -c "\dx"
 ```
 
+Esperado: **`hstore`** (a `plpgsql` vem por padrão em qualquer banco PostgreSQL). O `hstore` é a única extensão exigida pelo Hub - sem ela a migração do banco falha.
+
 ### Validar o Status do Gateway
 
 ```bash
-curl -sk https://aap01.aroque.com.br/api/gateway/v1/status/ | python3 -m json.tool
+curl -sk https://$AAP_HOST/api/gateway/v1/status/ | python3 -m json.tool
 ```
+
+> Se a resposta for `Expecting value: line 1 column 1 (char 0)`, o `curl` não recebeu JSON - normalmente porque o hostname não resolve, não é o FQDN do Gateway ou há proxy no caminho. Diagnostique sem o `python3`:
+>
+> ```bash
+> curl -vk https://$AAP_HOST/api/gateway/v1/status/
+> ```
 
 ### Validar o Receptor
 
+> **Não use `receptorctl`.** Na instalação containerizada do AAP 2.7 esse utilitário **não existe** nem no container `receptor` (que roda apenas o daemon) nem no `automation-controller-task`. Qualquer variação do comando retorna:
+>
+> ```
+> Error: crun: executable file `receptorctl` not found in $PATH: No such file or directory
+> ```
+>
+> Isso **não indica problema no mesh** - é apenas um binário que não está presente nas imagens.
+
+Valide pelo estado do serviço e pelos logs:
+
 ```bash
-podman exec -it receptor receptorctl status
+# O container precisa estar Up
+podman ps --filter name=receptor --format "table {{.Names}}\t{{.Status}}"
+
+# A unit precisa estar active (running)
+systemctl --user status receptor.service --no-pager
+
+# Sem erros de conexao/peer nos logs
+podman logs --tail 30 receptor
 ```
 
-### Validar o Performance Co-Pilot
+Em um nó único (all-in-one) não há peers remotos: o esperado é o receptor ativo, sem mensagens recorrentes de falha de conexão.
+
+Validação funcional (é o que realmente importa): o mesh está saudável se a instância aparece **Ready** e com capacidade na UI, em **Automation Controller → Instances**. O mesmo dado pela API:
+
+```bash
+curl -sk -u admin:'<senha>' https://$AAP_HOST/api/controller/v1/instances/ | python3 -m json.tool
+```
+
+Espere ver a instância do nó com `"enabled": true`, `"node_type": "hybrid"` e `capacity` maior que zero. Na prática, a validação definitiva do Receptor é **executar um job template** e vê-lo concluir com sucesso - é o Receptor que transporta a execução.
+
+### Validar o Performance Co-Pilot - **somente se instalado**
+
+> Execute esta validação **apenas se `setup_monitoring=true` estava no inventory** no momento da instalação. O padrão do instalador é `false`, ou seja, **o PCP não é instalado por padrão**.
+>
+> Se o PCP não foi habilitado, a saída abaixo é o **comportamento esperado, não um erro**:
+>
+> ```
+> Unit pmcd.service could not be found.
+> Unit pmlogger.service could not be found.
+> ```
+
+Conferir se foi habilitado no inventory:
+
+```bash
+grep setup_monitoring inventory-growth
+```
+
+Se `setup_monitoring=true`, então valide:
 
 ```bash
 sudo systemctl status pmcd pmlogger
-pcp
 ```
 
-### Validar o metrics-utility
+> O PCP é instalado como **RPM no host** (não é container), portanto depende dos repositórios BaseOS/AppStream do RHEL estarem acessíveis - ponto de atenção na instalação por bundle, que não traz RPMs. Para habilitar depois, acrescente `setup_monitoring=true` ao inventory e reexecute o instalador.
+
+### Validar o metrics-utility - **somente se instalado**
+
+> Execute esta validação **apenas se `metrics_utility_enabled=true` estava no inventory**. Sem essa variável o componente não é instalado, e `0 timers listed` é o **comportamento esperado, não um erro**.
+
+Conferir se foi habilitado e se o container existe:
 
 ```bash
-systemctl --user list-timers 'metrics-utility*' --no-pager
-ls -l /var/lib/awx/metrics_utility
+grep metrics_utility_enabled inventory-growth
+podman ps --format "{{.Names}}" | grep metrics-utility
+```
+
+Se estiver habilitado, valide os timers e o diretório de relatórios:
+
+```bash
+systemctl --user list-timers --all 'automation-controller-metrics-utility*' --no-pager
+```
+
+> **Atenção ao caminho**: o diretório de `METRICS_UTILITY_SHIP_PATH` (`/var/lib/awx/metrics_utility`) fica **dentro do container do Controller**, não no host. Um `ls -l /var/lib/awx/metrics_utility` executado no host **sempre** retorna `No such file or directory` - isso não significa que o metrics-utility falhou.
+
+```bash
+podman exec -it automation-controller-task ls -l /var/lib/awx/metrics_utility
 ```
 
 ### Acessos da Plataforma
@@ -675,8 +761,10 @@ ls -l /var/lib/awx/metrics_utility
 | Automation Hub | https://aap01.aroque.com.br/hub/ | `admin` |
 | Event-Driven Ansible | https://aap01.aroque.com.br/eda/ | `admin` |
 | Automation Dashboard | https://aap01.aroque.com.br/analytics/ | `admin` |
-| Ansible Lightspeed | https://aap01.aroque.com.br/lightspeed/ | `admin` |
-| Ansible MCP Server | https://aap01.aroque.com.br/mcp/ | token do Gateway |
+| Ansible Lightspeed (se instalado) | https://aap01.aroque.com.br/lightspeed/ | `admin` |
+| Ansible MCP Server (se instalado) | https://aap01.aroque.com.br/mcp/ | token do Gateway |
+
+> Substitua `aap01.aroque.com.br` pelo FQDN do seu ambiente (valor de `gateway_main_url`).
 
 ## Troubleshooting
 
